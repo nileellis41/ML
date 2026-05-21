@@ -1,0 +1,139 @@
+# Feature configuration for ETF research pipeline
+# All FRED series validated by src/data/validate_fred.py before use
+# Series IDs verified against FRED API -- fail loudly if any return empty
+
+# Universal macro block applied to EVERY ETF
+universal_macro:
+  fred:
+    - DGS10       # 10-Year Treasury Constant Maturity Rate
+    - DGS2        # 2-Year Treasury Constant Maturity Rate
+    - T10Y2Y      # 10-Year minus 2-Year Treasury spread (direct FRED series)
+    - BAMLH0A0HYM2  # ICE BofA US High Yield OAS
+    - BAMLC0A0CM    # ICE BofA US Corporate (IG) OAS
+    - T10YIE      # 10-Year Breakeven Inflation Rate
+    - VIXCLS      # CBOE Volatility Index (VIX)
+    - UNRATE      # Civilian Unemployment Rate
+    - INDPRO      # Industrial Production Index
+    - PAYEMS      # All Employees, Total Nonfarm
+    - DFF         # Federal Funds Effective Rate
+    - UMCSENT     # University of Michigan Consumer Sentiment
+    - DTWEXBGS    # Nominal Broad U.S. Dollar Index
+
+# Sector-specific feature blocks
+# Each ETF gets universal_macro PLUS these additional drivers
+sector_features:
+  XLK:   # Technology
+    fred:
+      - IPB50001SQ    # Industrial Production: Durable Consumer Goods
+      - NASDAQCOM     # NASDAQ Composite Index
+    cross_asset:
+      - SOXX          # Philadelphia Semiconductor ETF (via Alpaca)
+
+  XLF:   # Financials
+    fred:
+      - BUSLOANS      # Commercial and Industrial Loans, All Commercial Banks
+      - DRTSCILM      # Net % of Domestic Banks Tightening Standards for C&I Loans (Large)
+      - T10Y2Y        # Yield curve (key for bank NIM) -- also in universal but included here for emphasis
+      - DPSACBW027SBOG  # Deposits, All Commercial Banks
+
+  XLV:   # Health Care
+    fred:
+      - CPIMEDSL      # CPI: Medical Care
+      - PCEPI         # PCE Price Index (healthcare weight)
+
+  XLE:   # Energy
+    fred:
+      - DCOILWTICO    # WTI Crude Oil Price
+      - DCOILBRENTEU  # Brent Crude Oil Price
+      # WCRSTUS1 removed -- series does not exist on FRED (validated 2026-05-21)
+      - GASREGW       # U.S. Regular Conventional Gas Price
+
+  XLY:   # Consumer Discretionary
+    fred:
+      - RSAFS         # Advance Retail Sales: Retail and Food Services
+      - PSAVERT       # Personal Saving Rate
+      - TOTALSL       # Total Consumer Credit Outstanding
+
+  XLP:   # Consumer Staples
+    fred:
+      - CPIFABSL      # CPI: Food at Home
+      - PPIACO        # PPI: All Commodities
+
+  XLI:   # Industrials
+    fred:
+      - INDPRO        # Industrial Production (also in universal)
+      - NEWORDER      # Manufacturers New Orders: Durable Goods
+      - ISRATIO       # Total Business: Inventories to Sales Ratio
+
+  XLB:   # Materials
+    fred:
+      - PPIIDC        # PPI: Industrial Chemicals
+      - PCU33113311   # PPI: Aluminium Sheet, Plate, and Foil
+    cross_asset:
+      - CPER          # Copper ETF (via Alpaca)
+
+  XLU:   # Utilities
+    fred:
+      - DHHNGSP       # Henry Hub Natural Gas Spot Price
+    # Rate sensitivity captured by DGS10/T10Y2Y in universal block
+
+  XLRE:  # Real Estate
+    fred:
+      - MORTGAGE30US  # 30-Year Fixed Rate Mortgage Average
+      - CSUSHPINSA    # S&P/Case-Shiller U.S. National Home Price Index
+      - RRVRUSQ156N   # Vacancy Rate for Rental Housing
+
+  XLC:   # Communication Services
+    fred: []
+    # CPISS removed -- series does not exist on FRED (validated 2026-05-21)
+    # XLC relies on the universal macro block (VIX, HY OAS, rates, dollar, sentiment)
+
+  USO:   # Oil
+    fred:
+      - DCOILWTICO    # WTI Crude Oil Price
+      - DCOILBRENTEU  # Brent Crude Oil Price
+      # WCRSTUS1 removed -- series does not exist on FRED (validated 2026-05-21)
+      - DTWEXBGS      # Dollar index (oil is dollar-denominated)
+
+  GLD:   # Gold
+    fred:
+      - DFII10        # 10-Year Treasury Inflation-Indexed Security (real yield)
+      - T10YIE        # 10-Year Breakeven Inflation
+      - DTWEXBGS      # Dollar index
+
+  DBA:   # Agriculture
+    fred:
+      - PPIACO        # PPI: All Commodities
+      - CPIFABSL      # CPI: Food at Home
+
+  TLT:   # Long Treasuries (20+ Year)
+    fred:
+      - DGS10         # 10-Year yield
+      - DGS30         # 30-Year Treasury yield
+      - WALCL         # Fed Balance Sheet (total assets)
+
+  IEF:   # 7-10 Year Treasuries
+    fred:
+      - DGS7          # 7-Year Treasury yield
+      - DGS10         # 10-Year Treasury yield
+
+  LQD:   # Investment Grade Credit
+    fred:
+      - BAMLC0A0CM    # IG OAS (also universal)
+      - DGS10         # Duration risk
+
+  HYG:   # High Yield Credit
+    fred:
+      - BAMLH0A0HYM2  # HY OAS (also universal)
+      - DGS10         # Risk-free rate
+
+# Feature engineering settings applied across all blocks
+feature_engineering:
+  return_windows: [1, 5, 20, 60]        # Days for return calculation
+  vol_windows: [20, 60]                  # Days for realized volatility
+  zscore_macro: true                     # Z-score macro levels (avoid non-stationarity)
+  cross_sectional_rank: true             # Rank features across sector universe per date
+  commodity_features:                    # Extra features for commodity-linked sectors
+    log_change_windows: [20]
+    vol_windows: [60]
+    apply_to: [XLE, XLB, USO, DBA]

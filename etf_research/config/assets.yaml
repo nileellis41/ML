@@ -1,0 +1,72 @@
+# Asset universe for ETF research pipeline
+# All OHLCV pulled via Alpaca Market Data API (alpaca-py)
+# No yfinance -- Alpaca is the sole price/volume source
+
+sector_etfs:
+  - XLK   # Technology
+  - XLF   # Financials
+  - XLV   # Health Care
+  - XLE   # Energy
+  - XLY   # Consumer Discretionary
+  - XLP   # Consumer Staples
+  - XLI   # Industrials
+  - XLB   # Materials
+  - XLU   # Utilities
+  - XLRE  # Real Estate
+  - XLC   # Communication Services
+
+indices:
+  - SPY   # S&P 500
+  - QQQ   # Nasdaq 100
+  - IWM   # Russell 2000
+
+commodities:
+  - USO   # Oil (United States Oil Fund)
+  - GLD   # Gold
+  - DBA   # Agriculture
+
+bond_etfs:
+  - TLT   # 20+ Year Treasury
+  - IEF   # 7-10 Year Treasury
+  - LQD   # Investment Grade Corporate
+  - HYG   # High Yield Corporate
+
+# Cross-asset features pulled via Alpaca (used as features, not targets)
+cross_asset_features:
+  - SOXX  # Semiconductor ETF (feature for XLK)
+  - CPER  # Copper ETF (feature for XLB)
+
+# Data source config
+data:
+  provider: alpaca
+  adjustment: all        # Adjusted OHLCV (splits + dividends)
+  feed: iex              # IEX feed (free tier); change to sip if configured
+  start_date: "2016-01-01"
+  frequency: day         # Daily bars; monthly resampling for portfolio decisions
+  cache_dir: data/raw/alpaca
+
+# All tickers that need to be pulled (union of above)
+all_tickers:
+  - XLK
+  - XLF
+  - XLV
+  - XLE
+  - XLY
+  - XLP
+  - XLI
+  - XLB
+  - XLU
+  - XLRE
+  - XLC
+  - SPY
+  - QQQ
+  - IWM
+  - USO
+  - GLD
+  - DBA
+  - TLT
+  - IEF
+  - LQD
+  - HYG
+  - SOXX
+  - CPER

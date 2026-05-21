@@ -1,0 +1,111 @@
+# Experiment configuration for ETF research pipeline
+
+# Walk-forward validation settings
+walk_forward:
+  initial_train_years: 5       # Initial training window length
+  test_months: 1               # Rolling test window (monthly decisions)
+  refit_cadence:
+    slow_models: 12            # Months between refits for linear/logistic/PCA/VAR
+    fast_models: 3             # Months between refits for LSTM/CNN
+
+# Regime detection
+regime:
+  hmm:
+    n_states: 4
+    inputs: [SPY_return, VIXCLS, BAMLH0A0HYM2, T10Y2Y]
+    covariance_type: full
+    n_iter: 100
+    version: "v1"
+  lstm_regime:
+    seq_len: 60
+    hidden_size: 64
+    n_layers: 2
+    dropout: 0.2
+    target: hmm_labels         # or 'vol_buckets'
+    kappa_threshold: 0.7       # Min Cohen's kappa to accept classifier
+
+# Prediction model defaults (sensible first-pass -- HPO deferred)
+models:
+  linear:
+    fit_intercept: true
+    regularization: none       # Baseline OLS; add ridge as TODO
+
+  logistic:
+    C: 1.0
+    max_iter: 1000
+    solver: lbfgs
+
+  pca_factor:
+    n_components: 5            # Retain >=80% variance; log actual per fold
+    min_variance_explained: 0.80
+
+  var:
+    maxlags: 5
+    ic: bic                    # BIC for lag selection
+
+  lstm:
+    seq_len: 60
+    hidden_size: 64
+    n_layers: 2
+    dropout: 0.2
+    lr: 0.001
+    batch_size: 32
+    epochs: 50
+    patience: 10               # Early stopping patience
+
+  cnn:
+    image_height: 64
+    image_width: 60            # One column per trading day (60-day window)
+    n_channels: 2              # Channel 0: OHLC candles; Channel 1: volume bars
+    dropout: 0.5
+    lr: 0.001
+    batch_size: 32
+    epochs: 50
+    patience: 10
+    loss: mse                  # 'mse' for regression or 'bce' for direction
+
+  hybrids:
+    var_lstm:
+      residual_seq_len: 60
+    pca_lstm:
+      n_pca_components: 5
+      seq_len: 60
+    cnn_lstm:
+      n_images: 12             # Overlapping 60-day windows stepped weekly
+      lstm_hidden: 64
+
+# Portfolio allocators
+portfolio:
+  constraints:
+    long_only: true
+    max_weight: 0.25           # 25% cap per asset
+    min_weight: 0.0
+
+  model_based_rl:
+    horizon: 6                 # MPC rollout horizon (months)
+    n_rollouts: 100
+
+  policy_gradient:
+    algorithm: ppo
+    n_envs: 4
+    total_timesteps: 100000
+    reward: differential_sharpe  # or 'period_return'
+    turnover_penalty: 0.001
+
+  agentic_rag:
+    model: claude-sonnet-4-6
+    max_tokens: 4096
+    temperature: 0.0           # Deterministic for reproducibility
+    log_traces: true
+
+# Evaluation
+evaluation:
+  risk_free_rate: 0.0          # Or use 3M T-bill (DGS3MO from FRED)
+  benchmark: equal_weight      # Equal-weight across all ETFs
+  regime_conditional: true     # Compute per-regime metrics
+
+# Random seeds (also set in src/utils/seeds.py)
+seeds:
+  numpy: 42
+  torch: 42
+  python: 42
