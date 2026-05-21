@@ -252,13 +252,13 @@ def run_walk_forward(
     for fold in folds:
         train_df, test_df = split_fold(panel, fold)
 
-        X_train = train_df[feature_cols].values
+        X_train = np.nan_to_num(train_df[feature_cols].values, nan=0.0)
         y_train = train_df[target_col].values
-        X_test = test_df[feature_cols].values
+        X_test = np.nan_to_num(test_df[feature_cols].values, nan=0.0)
 
-        # Drop rows with NaN in features or target
-        train_valid = ~(np.isnan(X_train).any(axis=1) | np.isnan(y_train))
-        test_valid = ~np.isnan(X_test).any(axis=1)
+        # Only drop rows where the target is unknown; features are zero-imputed above
+        train_valid = ~np.isnan(y_train)
+        test_valid = np.ones(len(X_test), dtype=bool)
 
         if fold.refit or not fitted:
             model.fit(X_train[train_valid], y_train[train_valid])
@@ -273,8 +273,7 @@ def run_walk_forward(
                 fold.fold_id, test_valid.sum(),
             )
 
-        preds = np.full(len(X_test), np.nan)
-        preds[test_valid] = model.predict(X_test[test_valid])
+        preds = model.predict(X_test)
 
         result = test_df[[target_col]].copy()
         result["prediction"] = preds

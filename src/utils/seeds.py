@@ -10,14 +10,32 @@ from pathlib import Path
 
 import numpy as np
 
-# Auto-load .env on import so all modules that call set_all_seeds() get keys
-try:
-    from dotenv import load_dotenv
-    _env_path = Path(__file__).parent.parent.parent / ".env"
-    if _env_path.exists():
-        load_dotenv(_env_path, override=False)  # override=False: shell vars take precedence
-except ImportError:
-    pass  # python-dotenv optional; keys can still be set in the shell
+# Auto-load .env — works with or without python-dotenv, from any working directory.
+def _load_env() -> None:
+    """Parse .env at the project root; never overwrite vars already in the shell."""
+    # seeds.py lives at <root>/src/utils/seeds.py → root is two parents up
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=False)
+        return
+    except ImportError:
+        pass
+    # Fallback: plain parse — no third-party dependency needed
+    with open(env_path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+_load_env()
 
 logger = logging.getLogger(__name__)
 

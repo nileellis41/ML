@@ -28,7 +28,6 @@ regime:
 models:
   linear:
     fit_intercept: true
-    regularization: none       # Baseline OLS; add ridge as TODO
 
   logistic:
     C: 1.0

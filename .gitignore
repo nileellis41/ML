@@ -1,2 +1,6 @@
 etf_research/.env
 .env
+.venv/Lib/site-packages/_pytest/__pycache__/outcomes.cpython-312.pyc
+/.venv/Lib/site-packages
+/.venv/Scripts
+/.venv

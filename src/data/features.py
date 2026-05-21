@@ -67,7 +67,8 @@ def build_price_features(
     close = price_df["close"]
     ret_feats = _compute_returns(close, return_windows)
     vol_feats = _compute_realized_vol(ret_feats["ret_1d"], vol_windows)
-    return pd.concat([ret_feats, vol_feats], axis=1).add_prefix(f"{ticker}_")
+    # Use "own_" prefix so cross-sectional stacking keeps consistent column names
+    return pd.concat([ret_feats, vol_feats], axis=1).add_prefix("own_")
 
 
 def build_universal_macro_features(
@@ -134,6 +135,9 @@ def build_sector_features(
                 "Cross-asset %s not cached for %s; skipping feature.", ca_ticker, ticker
             )
             continue
+        # Strip tz-awareness from cached Alpaca data (pandas 3.0 requires tz consistency)
+        if ca_df.index.tz is not None:
+            ca_df.index = ca_df.index.tz_convert(None)
         close = ca_df["close"]
         ret_feats = _compute_returns(close, return_windows).add_prefix(f"ca_{ca_ticker}_")
         vol_feats = _compute_realized_vol(
@@ -210,10 +214,10 @@ def add_cross_sectional_ranks(
     Ranks each ETF's 20d return relative to its peers and appends as a new
     feature column.  Only uses tickers present in feature_dict.
     """
-    # Collect the target column across all tickers
+    # Collect the target column across all tickers — now stored as "own_ret_20d"
     rank_series: dict[str, pd.Series] = {}
     for ticker, df in feature_dict.items():
-        col = f"{ticker}{column_suffix}"
+        col = f"own{column_suffix}"
         if col in df.columns:
             rank_series[ticker] = df[col]
 

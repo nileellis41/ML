@@ -76,7 +76,11 @@ def load_ticker(
 
     if not force_refresh and cache_hit(path):
         logger.info("Cache hit for %s -- loading from %s", ticker, path)
-        return load_parquet(path)
+        df = load_parquet(path)
+        # Cached files written before the tz-strip fix may still be tz-aware.
+        if df is not None and df.index.tz is not None:
+            df.index = df.index.tz_convert(None)
+        return df
 
     end_dt = end or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     logger.info("Pulling %s from Alpaca (%s to %s, feed=%s)", ticker, start, end_dt, feed)
@@ -103,7 +107,12 @@ def load_ticker(
     # Normalise multi-index (symbol, timestamp) -> flat date index
     if isinstance(df.index, pd.MultiIndex):
         df = df.xs(ticker, level="symbol")
-    df.index = pd.DatetimeIndex(df.index).normalize()
+    # Alpaca returns tz-aware UTC timestamps; strip timezone so the index is
+    # tz-naive and compatible with FRED series (which are always tz-naive).
+    idx = pd.DatetimeIndex(df.index).normalize()
+    if idx.tz is not None:
+        idx = idx.tz_convert(None)
+    df.index = idx
     df.index.name = "date"
     df.columns = [c.lower() for c in df.columns]
 
