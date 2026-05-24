@@ -31,7 +31,19 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from src.evaluation.metrics import compute_all_metrics
+from src.baselines.portfolios import (
+    equal_weight,
+    momentum_12_1,
+    sixty_forty,
+    spy_buy_hold,
+)
+from src.evaluation.metrics import (
+    annualised_return,
+    annualised_volatility,
+    compute_all_metrics,
+    sharpe_ratio,
+    sharpe_se,
+)
 from src.utils.io import load_parquet
 from src.utils.seeds import set_all_seeds
 
@@ -85,8 +97,14 @@ def _load_daily_close(tickers: list[str]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _first_date_signals(pred_df: pd.DataFrame) -> dict[int, list[str]]:
-    """Return {fold_id: [positive_tickers]} using the first date per fold
-    that has at least one non-NaN prediction (handles LSTM burn-in NaNs)."""
+    """Return {fold_id: [long_tickers]} using the first date per fold that
+    has at least one non-NaN prediction (handles LSTM burn-in NaNs).
+
+    Signal rule: go long tickers whose prediction exceeds the cross-sectional
+    median for that date.  This is model-agnostic — correct for both linear
+    return predictions (which can be negative) and logistic probability outputs
+    (which are always positive, making prediction>0 uninformative).
+    """
     signals = {}
     for fold_id, fold_df in pred_df.groupby("fold_id"):
         dates = sorted(fold_df.index.get_level_values("date").unique())
@@ -95,8 +113,9 @@ def _first_date_signals(pred_df: pd.DataFrame) -> dict[int, list[str]]:
             day = fold_df[fold_df.index.get_level_values("date") == d]
             valid = day.dropna(subset=["prediction"])
             if not valid.empty:
+                med = valid["prediction"].median()
                 pos = (
-                    valid[valid["prediction"] > 0]
+                    valid[valid["prediction"] > med]
                     .index.get_level_values("ticker")
                     .tolist()
                 )
@@ -199,7 +218,15 @@ def _hit_rate_pairs(pred_df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
 
     signal_df = pd.concat(rows)
     valid = signal_df["prediction"].notna() & signal_df["target"].notna()
-    return signal_df.loc[valid, "prediction"], signal_df.loc[valid, "target"]
+
+    # Demean predictions cross-sectionally within each fold so that
+    # hit_rate's ">0" threshold means "above-median expected" rather
+    # than "any positive output" (which is always True for logistic probs).
+    preds = signal_df.loc[valid, "prediction"]
+    fold_medians = preds.groupby(signal_df.loc[valid, "fold_id"]).transform("median")
+    preds_demeaned = preds - fold_medians
+
+    return preds_demeaned, signal_df.loc[valid, "target"]
 
 
 def _spy_benchmark(test_dates: pd.DatetimeIndex) -> Optional[pd.Series]:
@@ -260,8 +287,169 @@ def build_comparison_table(
 
 
 # ---------------------------------------------------------------------------
+# Per-fold metrics (Task 3)
+# ---------------------------------------------------------------------------
+
+def _per_fold_metrics(
+    predictions: dict[str, pd.DataFrame],
+    regime_labels: Optional[pd.Series] = None,
+    rf: float = 0.0,
+) -> pd.DataFrame:
+    """Compute Sharpe ratio for every (model-variant, fold) combination.
+
+    Returns a DataFrame with columns [model_variant, fold_id, sharpe, n_days, sharpe_se].
+    """
+    rows = []
+    for model_variant, pred_df in predictions.items():
+        if "fold_id" not in pred_df.columns:
+            continue
+
+        fold_signals = _first_date_signals(pred_df)
+        date_to_fold = _date_to_fold_map(pred_df)
+
+        tickers = pred_df.index.get_level_values("ticker").unique().tolist()
+        close = _load_daily_close(tickers)
+        if close.empty:
+            continue
+        daily_ret = np.log(close / close.shift(1))
+
+        for fold_id in sorted(pred_df["fold_id"].unique()):
+            fold_dates = sorted(
+                pred_df[pred_df["fold_id"] == fold_id]
+                .index.get_level_values("date")
+                .unique()
+            )
+            pos = fold_signals.get(int(fold_id), [])
+
+            port: dict = {}
+            for d in fold_dates:
+                avail = [
+                    t for t in pos
+                    if t in daily_ret.columns
+                    and d in daily_ret.index
+                    and not np.isnan(daily_ret.at[d, t])
+                ]
+                if avail:
+                    port[d] = float(sum((1.0 / len(avail)) * daily_ret.at[d, t] for t in avail))
+                else:
+                    port[d] = 0.0
+
+            fold_ret = pd.Series(port).sort_index()
+            if len(fold_ret) < 5:
+                continue
+
+            sr = sharpe_ratio(fold_ret, rf=rf)
+            se = sharpe_se(len(fold_ret), sr) if not np.isnan(sr) else np.nan
+            rows.append({
+                "model_variant": model_variant,
+                "fold_id": int(fold_id),
+                "sharpe": sr,
+                "ann_return": annualised_return(fold_ret),
+                "n_days": len(fold_ret),
+                "sharpe_se": se,
+            })
+
+    return pd.DataFrame(rows)
+
+
+def plot_per_fold_sharpe(per_fold_df: pd.DataFrame) -> None:
+    """Boxplot of per-fold Sharpe distributions across model variants."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not available; skipping per-fold Sharpe plot")
+        return
+
+    if per_fold_df.empty:
+        return
+
+    _FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    variants = sorted(per_fold_df["model_variant"].unique())
+    data = [per_fold_df[per_fold_df["model_variant"] == v]["sharpe"].dropna().values for v in variants]
+
+    fig, ax = plt.subplots(figsize=(max(10, len(variants) * 1.2), 6))
+    bp = ax.boxplot(data, labels=variants, patch_artist=True, notch=False)
+    colors = plt.cm.tab20.colors
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="--", alpha=0.5)
+    ax.set_title("Per-Fold Annualised Sharpe Distribution by Model")
+    ax.set_xlabel("Model / Variant")
+    ax.set_ylabel("Annualised Sharpe (30-day fold)")
+    ax.set_xticklabels(variants, rotation=35, ha="right", fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+    out = _FIGURES_DIR / "sharpe_per_fold.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    logger.info("Per-fold Sharpe boxplot saved: %s", out)
+
+
+# ---------------------------------------------------------------------------
+# Baselines (Task 2)
+# ---------------------------------------------------------------------------
+
+def build_baselines_rows(
+    test_dates: pd.DatetimeIndex,
+    tickers: list[str],
+    spy_ret: Optional[pd.Series],
+    regime_labels: Optional[pd.Series] = None,
+    rf: float = 0.0,
+) -> list[dict]:
+    """Compute metrics for the 4 passive/rule-based baselines."""
+    baselines = {
+        "spy_bh": spy_buy_hold(test_dates),
+        "equal_weight": equal_weight(test_dates, tickers),
+        "momentum_12_1": momentum_12_1(test_dates, tickers),
+        "sixty_forty": sixty_forty(test_dates),
+    }
+    rows = []
+    for name, ret in baselines.items():
+        if ret is None or ret.isna().all():
+            logger.warning("Baseline %s returned all-NaN; skipping", name)
+            continue
+        ret = ret.fillna(0.0)
+        m = compute_all_metrics(
+            portfolio_returns=ret,
+            benchmark_returns=spy_ret,
+            regime_labels=regime_labels,
+            rf=rf,
+        )
+        rows.append({"model": name, "variant": "baseline", **m})
+        logger.info("Computed metrics for baseline/%s", name)
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Table persistence
 # ---------------------------------------------------------------------------
+
+def _format_regime_sharpe_col(table: pd.DataFrame, regime: str) -> pd.Series:
+    """Render 'X.XX [lo, hi]' for a regime Sharpe column when n_periods < 100."""
+    sharpe_col = f"regime_{regime}_sharpe"
+    se_col = f"regime_{regime}_sharpe_se"
+    lo_col = f"regime_{regime}_sharpe_ci_lo"
+    hi_col = f"regime_{regime}_sharpe_ci_hi"
+    n_col = f"regime_{regime}_n_periods"
+
+    if sharpe_col not in table.columns:
+        return None
+
+    def _fmt(row):
+        sr = row.get(sharpe_col, float("nan"))
+        n = row.get(n_col, 999)
+        lo = row.get(lo_col, float("nan"))
+        hi = row.get(hi_col, float("nan"))
+        if pd.isna(sr):
+            return "nan"
+        if not pd.isna(lo) and not pd.isna(hi) and n < 100:
+            return f"{sr:.2f} [{lo:.2f}, {hi:.2f}]"
+        return f"{sr:.2f}"
+
+    return table.apply(_fmt, axis=1)
+
 
 def save_tables(table: pd.DataFrame) -> None:
     _TABLES_DIR.mkdir(parents=True, exist_ok=True)
@@ -269,12 +457,35 @@ def save_tables(table: pd.DataFrame) -> None:
     table.to_csv(csv_path)
     logger.info("Master comparison table saved to %s", csv_path)
 
+    # Build a display copy that merges Sharpe+CI into one column for regimes
+    display = table.copy()
+    for col in display.select_dtypes(include="number").columns:
+        display[col] = display[col].round(4)
+
+    # Inline CI into regime Sharpe columns; drop raw se/ci_lo/ci_hi columns
+    regime_labels_found = set()
+    for col in table.columns:
+        if col.startswith("regime_") and col.endswith("_sharpe"):
+            parts = col.split("_")
+            # regime_<label>_sharpe  →  label is everything between first and last part
+            label = "_".join(parts[1:-1])
+            regime_labels_found.add(label)
+
+    ci_cols_to_drop = []
+    for regime in regime_labels_found:
+        formatted = _format_regime_sharpe_col(table, regime)
+        if formatted is not None:
+            display[f"regime_{regime}_sharpe"] = formatted
+        for suffix in ("_sharpe_se", "_sharpe_ci_lo", "_sharpe_ci_hi"):
+            col = f"regime_{regime}{suffix}"
+            if col in display.columns:
+                ci_cols_to_drop.append(col)
+    display = display.drop(columns=ci_cols_to_drop, errors="ignore")
+
     md_path = _TABLES_DIR / "master_comparison.md"
     with open(md_path, "w") as f:
         f.write("# Master Model Comparison\n\n")
-        display = table.copy()
-        for col in display.select_dtypes(include="number").columns:
-            display[col] = display[col].round(4)
+        f.write("> Regime Sharpe shown as: value [95% CI lo, hi] when n_periods < 100\n\n")
         f.write(display.to_markdown())
         f.write("\n")
     logger.info("Markdown table saved to %s", md_path)
@@ -439,8 +650,29 @@ def run_all(rf: float = 0.0) -> pd.DataFrame:
             regime_labels = hmm_df["predicted_label"]
 
     table = build_comparison_table(predictions, regime_labels=regime_labels, rf=rf)
+
+    # Baselines: use the same test dates as the first ML model
+    first_pred = next(iter(predictions.values()))
+    test_dates = first_pred.index.get_level_values("date").unique().sort_values()
+    all_tickers = first_pred.index.get_level_values("ticker").unique().tolist()
+    spy_ret_full = _spy_benchmark(test_dates)
+    baseline_rows = build_baselines_rows(
+        test_dates, all_tickers, spy_ret_full, regime_labels=regime_labels, rf=rf
+    )
+    if baseline_rows:
+        baseline_df = pd.DataFrame(baseline_rows).set_index(["model", "variant"])
+        table = pd.concat([table, baseline_df])
+
     if not table.empty:
         save_tables(table)
+
+    # Per-fold metrics (Task 3)
+    per_fold_df = _per_fold_metrics(predictions, regime_labels=regime_labels, rf=rf)
+    if not per_fold_df.empty:
+        _TABLES_DIR.mkdir(parents=True, exist_ok=True)
+        per_fold_df.to_csv(_TABLES_DIR / "per_fold_summary.csv", index=False)
+        logger.info("Per-fold summary saved: %d rows", len(per_fold_df))
+        plot_per_fold_sharpe(per_fold_df)
 
     plot_equity_curves(predictions, suffix="base")
     plot_equity_curves(predictions, suffix="regime")

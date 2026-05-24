@@ -83,6 +83,17 @@ def hit_rate(predictions: pd.Series, actuals: pd.Series) -> float:
     return float(((predictions[valid] > 0) == (actuals[valid] > 0)).mean())
 
 
+def sharpe_se(n_periods: int, sharpe_ann: float) -> float:
+    """Standard error of an annualised Sharpe ratio.
+
+    Uses 1/sqrt(n) * sqrt(252) — the asymptotic approximation under IID
+    returns with zero mean.  Multiply by 1.96 for a 95 % CI half-width.
+    """
+    if n_periods <= 0:
+        return np.nan
+    return float(np.sqrt(_TRADING_DAYS / n_periods))
+
+
 def information_ratio(
     portfolio_returns: pd.Series,
     benchmark_returns: pd.Series,
@@ -126,12 +137,18 @@ def regime_conditional_metrics(
             continue
         mask = labels == label
         r_slice = r[mask]
+        n = int(mask.sum())
+        sr = sharpe_ratio(r_slice, rf=rf)
+        se = sharpe_se(n, sr) if not np.isnan(sr) else np.nan
         results[str(label)] = {
             "ann_return": annualised_return(r_slice),
             "ann_vol": annualised_volatility(r_slice),
-            "sharpe": sharpe_ratio(r_slice, rf=rf),
+            "sharpe": sr,
+            "sharpe_se": se,
+            "sharpe_ci_lo": sr - 1.96 * se if not np.isnan(se) else np.nan,
+            "sharpe_ci_hi": sr + 1.96 * se if not np.isnan(se) else np.nan,
             "max_drawdown": max_drawdown(r_slice),
-            "n_periods": int(mask.sum()),
+            "n_periods": n,
         }
     return results
 

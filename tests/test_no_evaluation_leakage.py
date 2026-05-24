@@ -76,16 +76,28 @@ class TestFirstDateSignals:
         # One signal per fold — just check it ran without error and has correct keys
         assert set(signals.keys()) == {0, 1}
 
-    def test_all_positive_signal_when_all_preds_positive(self):
+    def test_above_median_signal_selects_half_the_tickers(self):
+        """Above-median rule selects tickers strictly above the cross-sectional median."""
+        tickers = ["X", "Y", "Z"]
+        df = _make_pred_df(tickers=tickers)
+        # Force distinct predictions so ranking is unambiguous
+        first_date = df.index.get_level_values("date").unique().sort_values()[0]
+        for i, t in enumerate(tickers):
+            df.loc[(first_date, t), "prediction"] = float(i)  # 0, 1, 2
+        signals = _first_date_signals(df)
+        # median = 1.0 → only "Z" (pred=2) is above median
+        assert "Z" in signals[0]
+        assert "X" not in signals[0]
+
+    def test_tied_predictions_yield_empty_signal(self):
+        """When all predictions are identical, none exceed the median → empty signal."""
         df = _make_pred_df(tickers=["X", "Y"])
-        # Force all predictions positive
         df["prediction"] = 1.0
         signals = _first_date_signals(df)
         for pos in signals.values():
-            assert "X" in pos
-            assert "Y" in pos
+            assert pos == []
 
-    def test_empty_signal_when_all_preds_negative(self):
+    def test_empty_signal_when_all_preds_negative_and_tied(self):
         df = _make_pred_df(tickers=["X", "Y"])
         df["prediction"] = -1.0
         signals = _first_date_signals(df)

@@ -28,6 +28,7 @@ regime:
 models:
   linear:
     fit_intercept: true
+    alpha: 1.0                   # Ridge L2 penalty; prevents explosion with regime interaction features
 
   logistic:
     C: 1.0

@@ -1,6 +1,10 @@
 """Gaussian HMM regime detector.
 
-4-state Gaussian HMM fit on (SPY returns, VIX, HY OAS, term spread).
+4-state Gaussian HMM fit on (equity-market returns, VIX, term spread).
+market_close should be NASDAQCOM from FRED (available 2014–present) rather
+than SPY from Alpaca IEX, which has a ~634-day gap before 2020-07 that causes
+the effective feature window to start only in late 2020. Using NASDAQCOM
+gives 5+ years of OOS labels covering the full model training period.
 States are labeled post-hoc by mean return + vol characteristics.
 Emits out-of-sample state probabilities only -- no leakage.
 
@@ -24,24 +28,28 @@ _OUTPUT_DIR = Path("data/regimes")
 
 
 def _build_hmm_inputs(
-    spy_close: pd.Series,
+    market_close: pd.Series,
     vix: pd.Series,
-    hy_oas: pd.Series,
+    hy_oas: Optional[pd.Series],
     term_spread: pd.Series,
 ) -> pd.DataFrame:
-    """Assemble and z-score the 4 HMM input series.
+    """Assemble and z-score the HMM input series.
 
     Uses 252-day rolling z-scores to keep features stationary without
     look-ahead (z-score parameters computed from trailing data only).
+    hy_oas is optional — omit if the series lacks sufficient history.
     """
-    spy_ret = np.log(spy_close / spy_close.shift(1))
+    market_ret = np.log(market_close / market_close.shift(1))
 
-    features = pd.DataFrame({
-        "spy_ret": spy_ret,
+    raw = {
+        "market_ret": market_ret,
         "vix": vix,
-        "hy_oas": hy_oas,
         "term_spread": term_spread,
-    }).dropna()
+    }
+    if hy_oas is not None:
+        raw["hy_oas"] = hy_oas
+
+    features = pd.DataFrame(raw).dropna()
 
     # Rolling z-score (252-day window, min 60 periods)
     zscored = (features - features.rolling(252, min_periods=60).mean()) / \
@@ -49,7 +57,7 @@ def _build_hmm_inputs(
     return zscored.dropna()
 
 
-def _label_states(probs: np.ndarray, spy_returns: np.ndarray) -> dict[int, str]:
+def _label_states(probs: np.ndarray, market_returns: np.ndarray) -> dict[int, str]:
     """Assign interpretable labels to HMM states by mean return + volatility.
 
     States are sorted by (mean_return DESC, vol ASC) and mapped to labels:
@@ -62,7 +70,7 @@ def _label_states(probs: np.ndarray, spy_returns: np.ndarray) -> dict[int, str]:
         if mask.sum() == 0:
             stats[s] = (0.0, float("inf"))
         else:
-            stats[s] = (spy_returns[mask].mean(), spy_returns[mask].std())
+            stats[s] = (market_returns[mask].mean(), market_returns[mask].std())
 
     # Sort by mean_return desc, then vol asc (proxy for crisis)
     sorted_states = sorted(stats.keys(), key=lambda s: (-stats[s][0], stats[s][1]))
@@ -71,9 +79,9 @@ def _label_states(probs: np.ndarray, spy_returns: np.ndarray) -> dict[int, str]:
 
 
 def fit_hmm_rolling(
-    spy_close: pd.Series,
+    market_close: pd.Series,
     vix: pd.Series,
-    hy_oas: pd.Series,
+    hy_oas: Optional[pd.Series],
     term_spread: pd.Series,
     initial_train_years: int = 5,
     n_states: int = _N_STATES,
@@ -86,8 +94,11 @@ def fit_hmm_rolling(
 
     Parameters
     ----------
-    spy_close, vix, hy_oas, term_spread:
-        Daily time series (DatetimeIndex, same calendar).
+    market_close:
+        Daily price series for any broad equity index. Use NASDAQCOM from FRED
+        (2014–present) for maximum OOS coverage over the model training window.
+    vix, hy_oas, term_spread:
+        Daily macro series. hy_oas is optional.
     initial_train_years:
         Length of first training window.
     n_states:
@@ -108,8 +119,8 @@ def fit_hmm_rolling(
                  predicted_state (argmax), predicted_label, version.
         Index: date (only out-of-sample dates).
     """
-    features = _build_hmm_inputs(spy_close, vix, hy_oas, term_spread)
-    spy_ret = np.log(spy_close / spy_close.shift(1)).reindex(features.index)
+    features = _build_hmm_inputs(market_close, vix, hy_oas, term_spread)
+    market_ret = np.log(market_close / market_close.shift(1)).reindex(features.index)
 
     all_probs: list[pd.DataFrame] = []
 
@@ -150,9 +161,9 @@ def fit_hmm_rolling(
             posteriors = np.full((len(X_test), n_states), 1.0 / n_states)
 
         test_dates = features.index[test_start_loc : test_end_loc + 1]
-        test_spy = spy_ret.reindex(test_dates).values
+        test_market = market_ret.reindex(test_dates).values
 
-        label_map = _label_states(posteriors, test_spy)
+        label_map = _label_states(posteriors, test_market)
 
         df = pd.DataFrame(
             posteriors,

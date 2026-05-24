@@ -142,7 +142,11 @@ class LSTMReturnModel(ModelInterface):
             torch.from_numpy(X_tr).to(self.device),
             torch.from_numpy(y_tr).to(self.device),
         )
-        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        # Fix seed in the DataLoader generator so shuffle order is reproducible
+        # across calls regardless of global RNG state at the time of iteration.
+        _g = torch.Generator()
+        _g.manual_seed(42)
+        loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, generator=_g)
 
         optimizer = torch.optim.Adam(self._net.parameters(), lr=self.lr)
         criterion = nn.MSELoss()

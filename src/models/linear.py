@@ -8,7 +8,7 @@ Both are floor benchmarks: if LSTM cannot beat OLS here, something is wrong.
 import logging
 
 import numpy as np
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from src.models.base import ModelInterface
@@ -23,10 +23,11 @@ class LinearReturnModel(ModelInterface):
     so coefficient magnitudes are comparable across folds.
     """
 
-    def __init__(self, fit_intercept: bool = True):
+    def __init__(self, fit_intercept: bool = True, alpha: float = 1.0):
         self.fit_intercept = fit_intercept
+        self.alpha = alpha
         self._scaler = StandardScaler()
-        self._model = LinearRegression(fit_intercept=fit_intercept)
+        self._model = Ridge(alpha=alpha, fit_intercept=fit_intercept)
         self._fitted = False
 
     def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
@@ -48,6 +49,7 @@ class LinearReturnModel(ModelInterface):
         return {
             "model": "LinearReturnModel",
             "fit_intercept": self.fit_intercept,
+            "alpha": self.alpha,
             "n_features": getattr(self._model, "n_features_in_", None),
         }
 
