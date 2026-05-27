@@ -43,7 +43,9 @@ from src.evaluation.metrics import (
     compute_all_metrics,
     sharpe_ratio,
     sharpe_se,
+    stationary_bootstrap_sharpe,
 )
+from src.evaluation.deflated_sharpe import compute_dsr_for_returns
 from src.utils.io import load_parquet
 from src.utils.seeds import set_all_seeds
 
@@ -451,24 +453,53 @@ def _format_regime_sharpe_col(table: pd.DataFrame, regime: str) -> pd.Series:
     return table.apply(_fmt, axis=1)
 
 
+def _metadata_header() -> str:
+    """Return a one-line metadata comment for table headers."""
+    import datetime, sys, subprocess
+    ts = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    pyver = f"Python {sys.version.split()[0]}"
+    try:
+        commit = subprocess.check_output(
+            ["git", "log", "--oneline", "-1"], stderr=subprocess.DEVNULL, text=True
+        ).strip()
+    except Exception:
+        commit = "git-not-available"
+    return f"# Generated: {ts} | {pyver} | commit: {commit}\n"
+
+
 def save_tables(table: pd.DataFrame) -> None:
     _TABLES_DIR.mkdir(parents=True, exist_ok=True)
+    meta = _metadata_header()
     csv_path = _TABLES_DIR / "master_comparison.csv"
-    table.to_csv(csv_path)
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write(meta)
+    table.to_csv(csv_path, mode="a")
     logger.info("Master comparison table saved to %s", csv_path)
 
-    # Build a display copy that merges Sharpe+CI into one column for regimes
+    # Build a display copy that merges Sharpe+CI into one column
     display = table.copy()
     for col in display.select_dtypes(include="number").columns:
         display[col] = display[col].round(4)
+
+    # Format main Sharpe as "X.XX [lo, hi]" when bootstrap CIs are present
+    if "sharpe_ci_lo" in table.columns and "sharpe_ci_hi" in table.columns:
+        def _fmt_main_sharpe(row):
+            sr = row.get("sharpe", float("nan"))
+            lo = row.get("sharpe_ci_lo", float("nan"))
+            hi = row.get("sharpe_ci_hi", float("nan"))
+            if pd.isna(sr):
+                return "nan"
+            if not pd.isna(lo) and not pd.isna(hi):
+                return f"{sr:.2f} [{lo:.2f}, {hi:.2f}]"
+            return f"{sr:.2f}"
+        display["sharpe"] = table.apply(_fmt_main_sharpe, axis=1)
+        display = display.drop(columns=["sharpe_ci_lo", "sharpe_ci_hi"], errors="ignore")
 
     # Inline CI into regime Sharpe columns; drop raw se/ci_lo/ci_hi columns
     regime_labels_found = set()
     for col in table.columns:
         if col.startswith("regime_") and col.endswith("_sharpe"):
-            parts = col.split("_")
-            # regime_<label>_sharpe  →  label is everything between first and last part
-            label = "_".join(parts[1:-1])
+            label = "_".join(col.split("_")[1:-1])
             regime_labels_found.add(label)
 
     ci_cols_to_drop = []
@@ -483,8 +514,10 @@ def save_tables(table: pd.DataFrame) -> None:
     display = display.drop(columns=ci_cols_to_drop, errors="ignore")
 
     md_path = _TABLES_DIR / "master_comparison.md"
-    with open(md_path, "w") as f:
+    with open(md_path, "w", encoding="utf-8") as f:
         f.write("# Master Model Comparison\n\n")
+        f.write(f"> {meta.lstrip('# ').strip()}\n\n")
+        f.write("> Sharpe shown as: value [95% bootstrap CI lo, hi]\n\n")
         f.write("> Regime Sharpe shown as: value [95% CI lo, hi] when n_periods < 100\n\n")
         f.write(display.to_markdown())
         f.write("\n")
@@ -494,6 +527,154 @@ def save_tables(table: pd.DataFrame) -> None:
 # ---------------------------------------------------------------------------
 # Plots
 # ---------------------------------------------------------------------------
+
+def plot_equity_curves_final(
+    ml_returns: dict[str, pd.Series],
+    baseline_returns: dict[str, pd.Series],
+    regime_labels: Optional[pd.Series] = None,
+) -> None:
+    """All-12-strategy equity curves figure for the final deliverable.
+
+    ML strategies: solid lines.  Baselines: dashed lines.
+    Colorblind-safe Okabe-Ito palette.  Regime shading at alpha=0.1.
+    Saves .png and .svg at dpi=150.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except ImportError:
+        logger.warning("matplotlib not available; skipping equity_curves_final")
+        return
+
+    # Okabe-Ito palette (8 colors, colorblind-safe)
+    _OI = ["#E69F00", "#56B4E9", "#009E73", "#F0E442",
+           "#0072B2", "#D55E00", "#CC79A7", "#000000",
+           "#999999", "#44AA99", "#882255", "#DDCC77"]
+
+    _FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(14, 6))
+
+    color_idx = 0
+    for key in sorted(ml_returns):
+        ret = ml_returns[key]
+        cum = ret.fillna(0.0).cumsum()
+        ax.plot(cum.index, cum.values, label=key,
+                color=_OI[color_idx % len(_OI)], linewidth=1.4, alpha=0.85)
+        color_idx += 1
+
+    for key in sorted(baseline_returns):
+        ret = baseline_returns[key]
+        cum = ret.fillna(0.0).cumsum()
+        ax.plot(cum.index, cum.values, label=key,
+                color=_OI[color_idx % len(_OI)], linewidth=1.8,
+                linestyle="--", alpha=0.9)
+        color_idx += 1
+
+    # Light regime shading
+    if regime_labels is not None:
+        regime_palette = {
+            "risk_on": "#009E73", "neutral": "#56B4E9",
+            "risk_off": "#E69F00", "crisis": "#D55E00",
+        }
+        # Build contiguous spans
+        all_dates = sorted(
+            set().union(*(r.index.tolist() for r in ml_returns.values()))
+        )
+        if all_dates:
+            rl = regime_labels.reindex(all_dates, method="ffill")
+            current, start = None, None
+            for d, lbl in rl.items():
+                if lbl != current:
+                    if current is not None:
+                        ax.axvspan(start, d, alpha=0.08,
+                                   color=regime_palette.get(str(current), "#aaaaaa"),
+                                   linewidth=0)
+                    current, start = lbl, d
+            if current is not None:
+                ax.axvspan(start, rl.index[-1], alpha=0.08,
+                           color=regime_palette.get(str(current), "#aaaaaa"),
+                           linewidth=0)
+
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Cumulative Log Return")
+    ax.legend(loc="upper left", fontsize=7, ncol=3, framealpha=0.7)
+    ax.grid(True, alpha=0.25)
+    fig.tight_layout()
+
+    for ext in ("png", "svg"):
+        out = _FIGURES_DIR / f"equity_curves_final.{ext}"
+        fig.savefig(out, dpi=150)
+        logger.info("Final equity curve plot saved: %s", out)
+    plt.close(fig)
+
+
+def plot_sharpe_per_fold_final(per_fold_df: pd.DataFrame) -> None:
+    """Publication-quality per-fold Sharpe boxplot with baselines.
+
+    Shows 12 boxes (8 ML + 4 baselines), a zero line, and a reference line
+    at the median per-fold Sharpe of momentum_12_1.
+    Saves .png and .svg at dpi=150.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        logger.warning("matplotlib not available; skipping sharpe_per_fold_final")
+        return
+
+    if per_fold_df.empty:
+        return
+
+    _FIGURES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Order: ML models first (alphabetical), then baselines
+    all_variants = sorted(per_fold_df["model_variant"].unique())
+    ml_variants = [v for v in all_variants if not any(
+        v.startswith(b) for b in ("spy_bh", "equal_weight", "momentum_12_1", "sixty_forty")
+    )]
+    bl_variants = [v for v in all_variants if v not in ml_variants]
+    ordered = ml_variants + bl_variants
+
+    data = [per_fold_df[per_fold_df["model_variant"] == v]["sharpe"].dropna().values
+            for v in ordered]
+
+    # Median per-fold Sharpe for momentum_12_1
+    mom_med = np.nan
+    mom_key = next((v for v in ordered if "momentum" in v), None)
+    if mom_key:
+        mom_data = per_fold_df[per_fold_df["model_variant"] == mom_key]["sharpe"].dropna()
+        if not mom_data.empty:
+            mom_med = float(mom_data.median())
+
+    fig, ax = plt.subplots(figsize=(max(12, len(ordered) * 1.3), 6))
+
+    # Colour: ML = light blue, baselines = light orange
+    n_ml = len(ml_variants)
+    colors = ["#56B4E9"] * n_ml + ["#E69F00"] * len(bl_variants)
+
+    bp = ax.boxplot(data, tick_labels=ordered, patch_artist=True, notch=False)
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax.axhline(0, color="black", linewidth=1.0, linestyle="--", alpha=0.6,
+               label="Sharpe = 0")
+    if not np.isnan(mom_med):
+        ax.axhline(mom_med, color="#D55E00", linewidth=1.2, linestyle=":",
+                   alpha=0.8, label=f"momentum_12_1 median = {mom_med:.2f}")
+
+    ax.set_xlabel("Model / Variant")
+    ax.set_ylabel("Annualised Sharpe (per fold)")
+    ax.set_xticklabels(ordered, rotation=35, ha="right", fontsize=8)
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", alpha=0.3)
+    fig.tight_layout()
+
+    for ext in ("png", "svg"):
+        out = _FIGURES_DIR / f"sharpe_per_fold_final.{ext}"
+        fig.savefig(out, dpi=150)
+        logger.info("Final per-fold Sharpe boxplot saved: %s", out)
+    plt.close(fig)
+
 
 def plot_equity_curves(
     predictions: dict[str, pd.DataFrame],
@@ -634,6 +815,8 @@ def plot_drawdowns(predictions: dict[str, pd.DataFrame]) -> None:
 
 def run_all(rf: float = 0.0) -> pd.DataFrame:
     """Load all cached predictions, compute metrics, save tables and plots."""
+    import time
+    _t0 = time.time()
     set_all_seeds()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-8s %(message)s")
 
@@ -651,11 +834,18 @@ def run_all(rf: float = 0.0) -> pd.DataFrame:
 
     table = build_comparison_table(predictions, regime_labels=regime_labels, rf=rf)
 
-    # Baselines: use the same test dates as the first ML model
+    # --- Baselines ---
     first_pred = next(iter(predictions.values()))
     test_dates = first_pred.index.get_level_values("date").unique().sort_values()
     all_tickers = first_pred.index.get_level_values("ticker").unique().tolist()
     spy_ret_full = _spy_benchmark(test_dates)
+
+    baseline_ret_series = {
+        "spy_bh":        spy_buy_hold(test_dates).fillna(0.0),
+        "equal_weight":  equal_weight(test_dates, all_tickers).fillna(0.0),
+        "momentum_12_1": momentum_12_1(test_dates, all_tickers).fillna(0.0),
+        "sixty_forty":   sixty_forty(test_dates).fillna(0.0),
+    }
     baseline_rows = build_baselines_rows(
         test_dates, all_tickers, spy_ret_full, regime_labels=regime_labels, rf=rf
     )
@@ -663,17 +853,79 @@ def run_all(rf: float = 0.0) -> pd.DataFrame:
         baseline_df = pd.DataFrame(baseline_rows).set_index(["model", "variant"])
         table = pd.concat([table, baseline_df])
 
+    # --- Bootstrap Sharpe CIs (Task 2) + Deflated Sharpe (Task 5) ---
+    logger.info("Computing bootstrap Sharpe CIs and DSR for %d strategies ...", len(table))
+    ml_ret_series: dict[str, pd.Series] = {}
+    for key, pred_df in predictions.items():
+        ret = _returns_from_predictions(pred_df)
+        if len(ret) > 0:
+            ml_ret_series[key] = ret
+
+    all_ret_series: dict[str, pd.Series] = {**ml_ret_series, **baseline_ret_series}
+
+    def _index_key(model: str, variant: str) -> str:
+        if variant == "baseline":
+            return model
+        return f"{model}_{variant}"
+
+    for (model, variant) in table.index:
+        ret_key = _index_key(model, variant)
+        ret = all_ret_series.get(ret_key)
+        if ret is None:
+            continue
+        _, ci_lo, ci_hi = stationary_bootstrap_sharpe(ret, n_boot=10_000)
+        dsr_pval = compute_dsr_for_returns(ret, n_trials=8)
+        table.at[(model, variant), "sharpe_ci_lo"] = ci_lo
+        table.at[(model, variant), "sharpe_ci_hi"] = ci_hi
+        table.at[(model, variant), "deflated_sharpe_pvalue"] = dsr_pval
+
     if not table.empty:
         save_tables(table)
 
-    # Per-fold metrics (Task 3)
+    # --- Per-fold metrics with baselines (Tasks 3 & 4) ---
     per_fold_df = _per_fold_metrics(predictions, regime_labels=regime_labels, rf=rf)
+
+    # Add baseline per-fold Sharpe using ML fold date ranges
     if not per_fold_df.empty:
+        fold_dates_map: dict[int, list] = {}
+        for key, pred_df in predictions.items():
+            if "fold_id" not in pred_df.columns:
+                continue
+            for fid, fdf in pred_df.groupby("fold_id"):
+                fold_dates_map[int(fid)] = sorted(
+                    fdf.index.get_level_values("date").unique()
+                )
+            break  # only need one model's fold structure
+
+        bl_rows = []
+        for bl_name, bl_ret in baseline_ret_series.items():
+            for fid, dates in fold_dates_map.items():
+                slice_ret = bl_ret.reindex(dates).dropna()
+                if len(slice_ret) < 5:
+                    continue
+                sr = sharpe_ratio(slice_ret, rf=rf)
+                se = sharpe_se(len(slice_ret), sr) if not np.isnan(sr) else np.nan
+                bl_rows.append({
+                    "model_variant": bl_name,
+                    "fold_id": fid,
+                    "sharpe": sr,
+                    "ann_return": annualised_return(slice_ret),
+                    "n_days": len(slice_ret),
+                    "sharpe_se": se,
+                })
+        if bl_rows:
+            per_fold_df = pd.concat([per_fold_df, pd.DataFrame(bl_rows)], ignore_index=True)
+
         _TABLES_DIR.mkdir(parents=True, exist_ok=True)
         per_fold_df.to_csv(_TABLES_DIR / "per_fold_summary.csv", index=False)
         logger.info("Per-fold summary saved: %d rows", len(per_fold_df))
         plot_per_fold_sharpe(per_fold_df)
+        plot_sharpe_per_fold_final(per_fold_df)
 
+    # --- Final equity curves figure (Task 3) ---
+    plot_equity_curves_final(ml_ret_series, baseline_ret_series, regime_labels)
+
+    # --- Legacy per-variant equity curves ---
     plot_equity_curves(predictions, suffix="base")
     plot_equity_curves(predictions, suffix="regime")
     plot_drawdowns(predictions)
@@ -687,7 +939,8 @@ def run_all(rf: float = 0.0) -> pd.DataFrame:
             spy_ret = np.log(spy_df["close"] / spy_df["close"].shift(1)).dropna()
             plot_regime_shaded_spy(spy_ret, regime_labels)
 
-    logger.info("Reporting complete. Results in %s", _RESULTS_DIR)
+    wall_time = time.time() - _t0
+    logger.info("Reporting complete in %.1f s. Results in %s", wall_time, _RESULTS_DIR)
     return table
 
 

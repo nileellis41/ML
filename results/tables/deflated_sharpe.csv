@@ -1,0 +1,13 @@
+strategy,deflated_sharpe_pvalue
+equal_weight,1.0
+linear_base,0.9999999999999996
+linear_regime,0.9999999999999907
+logistic_base,0.9999999999999877
+logistic_regime,0.9999999999994518
+lstm_base,1.0
+lstm_regime,1.0
+momentum_12_1,1.0
+pca_base,0.9999999999999982
+pca_regime,0.9999999999999978
+sixty_forty,1.0
+spy_bh,1.0

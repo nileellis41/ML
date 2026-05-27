@@ -53,6 +53,9 @@ def set_all_seeds(seed: int = 42) -> None:
             torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # warn_only=True: raise a warning (not an error) for ops without
+        # a deterministic kernel — safe for CPU-only LSTM workloads.
+        torch.use_deterministic_algorithms(True, warn_only=True)
     except ImportError:
         logger.warning("torch not installed; skipping torch seed")
 

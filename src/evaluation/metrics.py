@@ -94,6 +94,65 @@ def sharpe_se(n_periods: int, sharpe_ann: float) -> float:
     return float(np.sqrt(_TRADING_DAYS / n_periods))
 
 
+def stationary_bootstrap_sharpe(
+    returns: pd.Series,
+    n_boot: int = 10_000,
+    ci: float = 0.95,
+    block_size: Optional[int] = None,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Stationary bootstrap Sharpe confidence interval (Politis-Romano 1994).
+
+    Block size defaults to max(1, round(T^(1/3))), which approximates the
+    Politis-White (2004) optimal block length for typical financial return series.
+
+    Parameters
+    ----------
+    returns   : daily log return series
+    n_boot    : number of bootstrap replications
+    ci        : confidence level (e.g. 0.95 for 95 %)
+    block_size: mean block length; None uses T^(1/3)
+    seed      : RNG seed for reproducibility
+
+    Returns
+    -------
+    (sharpe_point, ci_lo, ci_hi)
+    """
+    r = returns.dropna().values.astype(float)
+    n = len(r)
+    if n < 20:
+        sr = float(r.mean() / r.std(ddof=1) * _TRADING_DAYS ** 0.5) if r.std(ddof=1) > 0 else np.nan
+        return sr, np.nan, np.nan
+
+    if block_size is None:
+        block_size = max(1, round(n ** (1 / 3)))
+    p = 1.0 / block_size
+
+    rng = np.random.default_rng(seed)
+
+    # Build (n_boot, n) bootstrap index matrix via stationary bootstrap transitions.
+    # At each step, with prob p start a new random block; otherwise advance by 1 (mod n).
+    pos = np.empty((n_boot, n), dtype=np.int32)
+    pos[:, 0] = rng.integers(0, n, size=n_boot)
+    for t in range(1, n):
+        new_block = rng.random(n_boot) < p
+        new_starts = rng.integers(0, n, size=n_boot)
+        pos[:, t] = np.where(new_block, new_starts, (pos[:, t - 1] + 1) % n)
+
+    boot_r = r[pos]  # (n_boot, n)
+    boot_mu = boot_r.mean(axis=1)
+    boot_sig = boot_r.std(axis=1, ddof=1)
+    valid = boot_sig > 0
+    boot_sr = np.full(n_boot, np.nan)
+    boot_sr[valid] = boot_mu[valid] / boot_sig[valid] * np.sqrt(_TRADING_DAYS)
+
+    tail = (1.0 - ci) / 2.0
+    ci_lo = float(np.nanpercentile(boot_sr, tail * 100))
+    ci_hi = float(np.nanpercentile(boot_sr, (1.0 - tail) * 100))
+    sr_pt = float(r.mean() / r.std(ddof=1) * np.sqrt(_TRADING_DAYS)) if r.std(ddof=1) > 0 else np.nan
+    return sr_pt, ci_lo, ci_hi
+
+
 def information_ratio(
     portfolio_returns: pd.Series,
     benchmark_returns: pd.Series,
