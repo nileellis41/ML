@@ -182,10 +182,16 @@ c:\Users\nilee\OneDrive\Desktop\NYU\ML\etf_research\
 │   ├── experiments\             # run_all.py
 │   └── utils\                   # seeds.py, io.py
 ├── notebooks\                   # 01 through 06
-├── tests\                       # 28 tests (leakage, FRED, candlestick)
+├── tests\                       # 78 tests (leakage, FRED, candlestick, significance, deflated Sharpe)
 └── results\
-    ├── tables\                  # master_comparison.csv / .md
-    ├── figures\                 # equity curves, drawdowns, regime plots, candle samples
+    ├── tables\                  # master_comparison.csv / .md, significance_vs_baselines.csv, deflated_sharpe.csv
+    ├── figures\                 # equity curves (final png+svg), Sharpe boxplots (final png+svg), regime plots
     ├── predictions\             # {model}_{variant}.parquet
     └── agent_traces\            # Agentic RAG reasoning logs (JSON)
 ```
+
+---
+
+## Phase 1 Conclusion
+
+Over 640 out-of-sample trading days (2023-11-02 to 2026-05-22, 30 walk-forward folds, 21 sector ETFs), none of the eight ML configurations (linear, logistic, LSTM, PCA × base/regime) produced statistically distinguishable returns from any of the four passive baselines at p < 0.05 after Bonferroni correction across 32 comparisons (best raw p = 0.071). Regime conditioning consistently reduced maximum drawdown by 1.6–7.6 pp without adding directional alpha. Full results, methodology, and Phase 2 scope are documented in [`docs/PHASE_1_FINAL.md`](docs/PHASE_1_FINAL.md); figures are in [`results/figures/equity_curves_final.png`](results/figures/equity_curves_final.png) and [`results/figures/sharpe_per_fold_final.png`](results/figures/sharpe_per_fold_final.png). This state is archived under git tag `phase-1-final`.
